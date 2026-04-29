@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>sssandboxPLUS</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; color: #0f0; font-family: 'Courier New', monospace; touch-action: none; }
+        canvas { display: block; cursor: crosshair; }
+        
+        #ui-container {
+            position: absolute; top: 10px; left: 10px;
+            z-index: 100;
+            transition: transform 0.3s ease;
+        }
+        
+        #ui { 
+            background: rgba(10, 10, 10, 0.95); padding: 15px; 
+            border: 2px solid #0f0; border-radius: 0px;
+            box-shadow: 5px 5px 0px #005500;
+            pointer-events: auto;
+            width: 240px;
+        }
+
+        #minimize-btn {
+            background: #0f0; color: #000;
+            border: none; padding: 2px 10px;
+            font-size: 10px; font-weight: bold;
+            cursor: pointer; position: absolute;
+            top: -2px; right: -2px;
+        }
+
+        .hidden { transform: translateX(-110%); }
+
+        input, button, select { background: #000; color: #0f0; border: 1px solid #0f0; margin-bottom: 8px; width: 100%; box-sizing: border-box; }
+        button, select { padding: 8px; font-weight: bold; text-transform: uppercase; cursor: pointer; font-size: 10px; }
+        button:hover { background: #0f0; color: #000; }
+        label { font-size: 11px; display: block; margin-top: 5px; color: #0a0; }
+        .stat { font-size: 10px; color: #0f0; margin-bottom: 5px; border-bottom: 1px solid #111; }
+        .hint { color: #555; font-size: 10px; border-top: 1px solid #222; margin-top: 10px; padding-top: 5px; }
+        .title { font-size: 20px; font-weight: bold; text-align: center; margin-bottom: 10px; letter-spacing: 2px; }
+        
+        #mod-section { border-top: 2px dashed #0f0; margin-top: 10px; padding-top: 10px; }
+        #file-input { font-size: 9px; padding: 5px; color: #0f0; }
+        #kernel-status { font-size: 9px; color: #ff0; margin-top: 5px; }
+
+        #show-btn {
+            position: absolute; top: 10px; left: 10px;
+            background: #000; color: #0f0; border: 1px solid #0f0;
+            padding: 5px 10px; cursor: pointer; display: none;
+            z-index: 99;
+        }
+    </style>
+</head>
+<body>
+
+<div id="show-btn" onclick="toggleUI()">[+] RESET</div>
+
+<div id="ui-container">
+    <div id="ui">
+        <button id="minimize-btn" onclick="toggleUI()">_</button>
+        <div class="title">sssandbox</div>
+        
+        <div class="stat">FOLLOWING: <span id="target-name">NONE</span></div>
+        
+        <label>OBJECT_FINDER</label>
+        <select id="obj-list" onchange="locateBody(this.value)">
+            <option value="">-- SELECT_TARGET --</option>
+        </select>
+        
+        <label>TIME_SCALE (SUB-STEPPED)</label>
+        <input type="number" id="tSpeed" value="1" step="0.1">
+
+        <label>SPAWN_MASS</label>
+        <input type="number" id="pMass" value="100">
+
+        <label>COLOR_HEX</label>
+        <input type="color" id="pColor" value="#00ffff">
+        
+        <button onclick="preloadDetailedSystem()">LOAD SOLAR SYSTEM</button>
+        <button onclick="bodies = []; following = null; updateObjList();">CLEAR ALL</button>
+
+        <div id="mod-section">
+            <label>IMPORT (.js)</label>
+            <input type="file" id="file-input" accept=".js">
+            <button onclick="loadModFile()">RUN</button>
+            <div id="kernel-status">STATUS: STABLE</div>
+            <button onclick="location.reload()" style="border-color: #f00; color: #f00; margin-top: 5px;">RELOAD</button>
+        </div>
+
+        <div class="hint">
+            WASD: NAVIGATE | Q/E: ZOOM<br>
+            CLICK: SPAWN/FOLLOW | MOUSEWHEEL: ZOOM<br>
+            TOUCH: PINCH ZOOM | DRAG: PAN | TAP: SPAWN
+        </div>
+    </div>
+</div>
+
+<canvas id="universe"></canvas>
+
+<script>
+function toggleUI() {
+    const container = document.getElementById('ui-container');
+    const showBtn = document.getElementById('show-btn');
+    container.classList.toggle('hidden');
+    showBtn.style.display = container.classList.contains('hidden') ? 'block' : 'none';
+}
+
+const canvas = document.getElementById('universe');
+const ctx = canvas.getContext('2d');
+let width, height;
+function resize() {
+    width = canvas.width = window.innerWidth;
+    height = canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+let camX = 0; let camY = 0; let zoom = 0.15;
+let following = null;
+const keys = {};
+let bodies = [];
+let G = 1.2;
+let lastListUpdate = 0;
+
+// TOUCH VARS
+let lastTouchDist = 0;
+let lastTouchPos = null;
+
+function loadModFile() {
+    const fileInput = document.getElementById('file-input');
+    const status = document.getElementById('kernel-status');
+    const file = fileInput.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const script = document.createElement('script');
+            script.text = e.target.result;
+            document.body.appendChild(script);
+            status.innerText = "SUCCESS: " + file.name + " MOUNTED";
+            status.style.color = "#0f0";
+            updateObjList();
+        } catch (err) {
+            status.innerText = "CRITICAL_ERROR";
+            status.style.color = "#f00";
+        }
+    };
+    reader.readAsText(file);
+}
+
+function updateObjList() {
+    const list = document.getElementById('obj-list');
+    const currentVal = list.value;
+    list.innerHTML = '<option value="">-- SELECT_TARGET --</option>';
+    
+    bodies.filter(b => b.name && b.exists).forEach(b => {
+        const opt = document.createElement('option');
+        opt.value = b.name;
+        opt.innerHTML = b.name;
+        if (b.name === currentVal) opt.selected = true;
+        list.appendChild(opt);
+    });
+}
+
+function locateBody(name) {
+    if (!name) { following = null; return; }
+    const target = bodies.find(b => b.name === name);
+    if (target) { 
+        following = target; 
+        zoom = Math.max(zoom, 0.2); 
+    }
+}
+
+class Body {
+    constructor(x, y, vx, vy, mass, color, name = "", isStatic = false) {
+        this.x = x; this.y = y;
+        this.vx = vx; this.vy = vy;
+        this.mass = Number(mass); this.color = color;
+        this.name = name;
+        this.isStatic = isStatic;
+        this.exists = true;
+        this.trail = [];
+    }
+
+    getRadius() { return Math.sqrt(this.mass) * 0.8; }
+
+    drawTrail() {
+        if (!this.exists || this.trail.length < 2) return;
+        ctx.beginPath();
+        ctx.strokeStyle = this.color + "33"; 
+        ctx.moveTo((this.trail[0].x - camX) * zoom + width / 2, (this.trail[0].y - camY) * zoom + height / 2);
+        for(let p of this.trail) {
+            ctx.lineTo((p.x - camX) * zoom + width / 2, (p.y - camY) * zoom + height / 2);
+        }
+        ctx.stroke();
+    }
+
+    drawBody() {
+        if (!this.exists) return;
+        const sX = (this.x - camX) * zoom + width / 2;
+        const sY = (this.y - camY) * zoom + height / 2;
+        const r = Math.max(0.2, this.getRadius() * zoom);
+        ctx.beginPath();
+        ctx.arc(sX, sY, r, 0, Math.PI * 2);
+        ctx.fillStyle = this.color;
+        ctx.fill();
+        if (this.name && zoom > 0.05) {
+            ctx.fillStyle = "#fff"; ctx.font = "10px monospace";
+            ctx.fillText(this.name, sX + r + 5, sY + 5);
+        }
+    }
+
+    update(all, dt) {
+        if (!this.exists || dt === 0) return;
+        
+        if (this.trail.length === 0 || Math.hypot(this.x - this.trail[this.trail.length-1].x, this.y - this.trail[this.trail.length-1].y) > 15) {
+            this.trail.push({x: this.x, y: this.y});
+            if (this.trail.length > 120) this.trail.shift();
+        }
+
+        if (this.isStatic) return;
+
+        const steps = 8;
+        const sDt = dt / steps;
+        
+        for(let i = 0; i < steps; i++) {
+            let ax = 0, ay = 0;
+            all.forEach(other => {
+                if (other === this || !other.exists) return;
+                const dx = other.x - this.x;
+                const dy = other.y - this.y;
+                const distSq = dx * dx + dy * dy;
+                const dist = Math.sqrt(distSq);
+
+                if (dist < (this.getRadius() + other.getRadius()) * 0.75) {
+                    const totalM = this.mass + other.mass;
+                    this.vx = (this.vx * this.mass + other.vx * other.mass) / totalM;
+                    this.vy = (this.vy * this.mass + other.vy * other.mass) / totalM;
+                    this.mass = totalM;
+                    other.exists = false;
+                    if (following === other) following = this;
+                    return;
+                }
+                const force = (G * other.mass) / (distSq + 0.3);
+                ax += (dx / dist) * force; ay += (dy / dist) * force;
+            });
+            this.vx += ax * sDt; this.vy += ay * sDt;
+            this.x += this.vx * sDt; this.y += this.vy * sDt;
+        }
+    }
+}
+
+function preloadDetailedSystem() {
+    bodies = []; camX = 0; camY = 0; zoom = 0.15; following = null;
+    bodies.push(new Body(0, 0, 0, 0, 15000, '#fff500', 'SUN', true));
+    const planets = [
+        { d: 250, m: 20, c: '#A5A5A5', n: 'MERCURY' },
+        { d: 450, m: 50, c: '#E3BB76', n: 'VENUS' },
+        { d: 750, m: 60, c: '#2271B3', n: 'EARTH', moons: [{ d: 45, m: 5, c: '#ddd', n: 'MOON' }] },
+        { d: 1100, m: 40, c: '#E27B58', n: 'MARS', moons: [{ d: 25, m: 0.8, c: '#666', n: 'PHOBOS' }, { d: 45, m: 0.5, c: '#444', n: 'DEIMOS' }] },
+        { d: 2400, m: 600, c: '#D39C7E', n: 'JUPITER', moons: [{ d: 80, m: 8, c: '#fff', n: 'IO' }, { d: 110, m: 7, c: '#eee', n: 'EUROPA' }, { d: 150, m: 15, c: '#ccc', n: 'GANYMEDE' }, { d: 200, m: 12, c: '#bbb', n: 'CALLISTO' }] },
+        { d: 3800, m: 500, c: '#C5AB6E', n: 'SATURN', moons: [{ d: 70, m: 2, c: '#fff', n: 'TETHYS' }, { d: 100, m: 2, c: '#eee', n: 'DIONE' }, { d: 140, m: 4, c: '#ddd', n: 'RHEA' }, { d: 190, m: 20, c: '#fca', n: 'TITAN' }, { d: 250, m: 3, c: '#bbb', n: 'IAPETUS' }] },
+        { d: 5200, m: 200, c: '#B5E2E2', n: 'URANUS', moons: [{ d: 60, m: 1.5, c: '#fff', n: 'ARIEL' }, { d: 90, m: 1.5, c: '#ddd', n: 'UMBRIEL' }, { d: 130, m: 3, c: '#ccc', n: 'TITANIA' }, { d: 170, m: 2.5, c: '#bbb', n: 'OBERON' }] },
+        { d: 6800, m: 210, c: '#3E54E8', n: 'NEPTUNE', moons: [{ d: 90, m: 6, c: '#ddd', n: 'TRITON' }] },
+        { d: 8200, m: 5, c: '#937D64', n: 'PLUTO', moons: [{ d: 35, m: 1.2, c: '#888', n: 'CHARON' }] }
+    ];
+    planets.forEach(p => {
+        const v = Math.sqrt((G * 15000) / p.d);
+        const ang = Math.random() * 6.28;
+        const px = Math.cos(ang)*p.d; const py = Math.sin(ang)*p.d;
+        const pvx = -Math.sin(ang)*v; const pvy = Math.cos(ang)*v;
+        bodies.push(new Body(px, py, pvx, pvy, p.m, p.c, p.n));
+        if (p.moons) p.moons.forEach(m => {
+            const mAng = Math.random() * 6.28; const mV = Math.sqrt((G * p.m) / m.d);
+            bodies.push(new Body(px + Math.cos(mAng)*m.d, py + Math.sin(mAng)*m.d, pvx - Math.sin(mAng)*mV, pvy + Math.cos(mAng)*mV, m.m, m.c, m.n));
+        });
+    });
+    updateObjList();
+}
+
+// PC INPUTS
+window.addEventListener('keydown', e => { if (!e.ctrlKey) keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+window.addEventListener('wheel', e => {
+    e.preventDefault();
+    zoom *= e.deltaY > 0 ? 0.9 : 1.1;
+}, { passive: false });
+
+canvas.addEventListener('mousedown', e => {
+    if (e.target !== canvas) return;
+    handleInteraction(e.clientX, e.clientY);
+});
+
+// TOUCH INPUTS
+canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+        const t = e.touches[0];
+        lastTouchPos = { x: t.clientX, y: t.clientY };
+        handleInteraction(t.clientX, t.clientY);
+    } else if (e.touches.length === 2) {
+        lastTouchDist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (e.touches.length === 1 && lastTouchPos) {
+        following = null;
+        const t = e.touches[0];
+        camX -= (t.clientX - lastTouchPos.x) / zoom;
+        camY -= (t.clientY - lastTouchPos.y) / zoom;
+        lastTouchPos = { x: t.clientX, y: t.clientY };
+    } else if (e.touches.length === 2) {
+        const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+        if (lastTouchDist > 0) {
+            zoom *= (dist / lastTouchDist);
+        }
+        lastTouchDist = dist;
+    }
+}, { passive: false });
+
+canvas.addEventListener('touchend', () => {
+    lastTouchPos = null;
+    lastTouchDist = 0;
+});
+
+function handleInteraction(clientX, clientY) {
+    const wx = (clientX - width / 2) / zoom + camX;
+    const wy = (clientY - height / 2) / zoom + camY;
+    for (let b of bodies) {
+        if (Math.hypot(b.x - wx, b.y - wy) < b.getRadius() + 15/zoom) { following = b; return; }
+    }
+    following = null;
+    const dist = Math.hypot(wx, wy); 
+    const v = Math.sqrt((G * 15000) / (dist || 1));
+    const ang = Math.atan2(wy, wx);
+    const m = parseFloat(document.getElementById('pMass').value) || 100;
+    bodies.push(new Body(wx, wy, -Math.sin(ang)*v, Math.cos(ang)*v, m, document.getElementById('pColor').value));
+    updateObjList();
+}
+
+function main(time) {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, width, height);
+    bodies = bodies.filter(b => b.exists);
+    const dt = parseFloat(document.getElementById('tSpeed').value) || 0;
+    
+    if (time - lastListUpdate > 2000) { updateObjList(); lastListUpdate = time; }
+
+    if (following && following.exists) { 
+        camX = following.x; camY = following.y; 
+        document.getElementById('target-name').innerText = following.name || "UNNAMED"; 
+    } else {
+        document.getElementById('target-name').innerText = "NONE";
+    }
+    
+    const scroll = 15 / zoom;
+    if (keys['w']) { camY -= scroll; following = null; }
+    if (keys['s']) { camY += scroll; following = null; }
+    if (keys['a']) { camX -= scroll; following = null; }
+    if (keys['d']) { camX += scroll; following = null; }
+    if (keys['q']) zoom *= 1.05; if (keys['e']) zoom *= 0.95;
+    
+    bodies.forEach(b => b.update(bodies, dt));
+    bodies.forEach(b => b.drawTrail());
+    bodies.forEach(b => b.drawBody());
+    requestAnimationFrame(main);
+}
+preloadDetailedSystem();
+requestAnimationFrame(main);
+</script>
+</body>
+</html>
